@@ -217,3 +217,225 @@
     });
   }
 })();
+
+// Floor-plan lightbox zoom: mouse-wheel + touch pinch/pan -------------------
+(() => {
+  const modal = document.getElementById('lightboxModal');
+  const image = document.getElementById('lightboxImage');
+  if (!modal || !image) return;
+
+  const card = modal.querySelector('.lightbox-card');
+  if (!card) return;
+
+  // Build the zoom UI at runtime so index.html does not need to change.
+  let viewport = card.querySelector('.floorplan-zoom-viewport');
+  if (!viewport) {
+    viewport = document.createElement('div');
+    viewport.className = 'floorplan-zoom-viewport';
+    image.parentNode.insertBefore(viewport, image);
+    viewport.appendChild(image);
+  }
+
+  let toolbar = card.querySelector('.floorplan-zoom-toolbar');
+  if (!toolbar) {
+    toolbar = document.createElement('div');
+    toolbar.className = 'floorplan-zoom-toolbar';
+    toolbar.setAttribute('aria-label', 'Floor plan zoom controls');
+    toolbar.innerHTML = `
+      <button type="button" class="floorplan-zoom-button" data-floorplan-zoom-out aria-label="Zoom out">−</button>
+      <span class="floorplan-zoom-level" data-floorplan-zoom-level>100%</span>
+      <button type="button" class="floorplan-zoom-button" data-floorplan-zoom-in aria-label="Zoom in">+</button>
+      <button type="button" class="floorplan-zoom-reset" data-floorplan-zoom-reset>Reset</button>
+    `;
+    card.insertBefore(toolbar, viewport);
+  }
+
+  const level = toolbar.querySelector('[data-floorplan-zoom-level]');
+  const zoomIn = toolbar.querySelector('[data-floorplan-zoom-in]');
+  const zoomOut = toolbar.querySelector('[data-floorplan-zoom-out]');
+  const resetButton = toolbar.querySelector('[data-floorplan-zoom-reset]');
+
+  const MIN_ZOOM = 1;
+  const MAX_ZOOM = 5;
+  const BUTTON_STEP = 0.25;
+  const WHEEL_STEP = 0.14;
+  let zoom = 1;
+  let active = false;
+
+  const clamp = value => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+
+  const renderZoom = () => {
+    image.style.width = `${zoom * 100}%`;
+    image.style.maxWidth = 'none';
+    image.style.maxHeight = 'none';
+    image.style.height = 'auto';
+    if (level) level.textContent = `${Math.round(zoom * 100)}%`;
+    zoomOut.disabled = zoom <= MIN_ZOOM + 0.001;
+    zoomIn.disabled = zoom >= MAX_ZOOM - 0.001;
+  };
+
+  const setZoomAtPoint = (nextZoom, clientX, clientY) => {
+    const next = clamp(nextZoom);
+    if (Math.abs(next - zoom) < 0.001) return;
+
+    const rect = viewport.getBoundingClientRect();
+    const x = clientX == null ? viewport.clientWidth / 2 : clientX - rect.left;
+    const y = clientY == null ? viewport.clientHeight / 2 : clientY - rect.top;
+    const ratio = next / zoom;
+
+    const newScrollLeft = (viewport.scrollLeft + x) * ratio - x;
+    const newScrollTop = (viewport.scrollTop + y) * ratio - y;
+
+    zoom = next;
+    renderZoom();
+    viewport.scrollLeft = newScrollLeft;
+    viewport.scrollTop = newScrollTop;
+  };
+
+  const resetZoom = () => {
+    zoom = 1;
+    renderZoom();
+    viewport.scrollLeft = 0;
+    viewport.scrollTop = 0;
+  };
+
+  const setFloorplanMode = isFloorplan => {
+    active = isFloorplan;
+    card.classList.toggle('floorplan-zoom-active', active);
+    toolbar.hidden = !active;
+    viewport.classList.toggle('is-floorplan', active);
+    resetZoom();
+  };
+
+  // Detect which source image opened the existing lightbox.
+  document.querySelectorAll('[data-lightbox]').forEach(source => {
+    source.addEventListener('click', () => {
+      const isFloorplan = Boolean(source.closest('.floorplan-figure')) ||
+        /IFC-V86-A10\d/i.test(source.getAttribute('src') || '');
+      window.requestAnimationFrame(() => setFloorplanMode(isFloorplan));
+    });
+  });
+
+  zoomIn.addEventListener('click', () => setZoomAtPoint(zoom + BUTTON_STEP));
+  zoomOut.addEventListener('click', () => setZoomAtPoint(zoom - BUTTON_STEP));
+  resetButton.addEventListener('click', resetZoom);
+
+  // Desktop / trackpad: wheel up zooms in, wheel down zooms out.
+  viewport.addEventListener('wheel', event => {
+    if (!active) return;
+    event.preventDefault();
+    const direction = event.deltaY < 0 ? 1 : -1;
+    setZoomAtPoint(zoom + direction * WHEEL_STEP, event.clientX, event.clientY);
+  }, { passive: false });
+
+  // Desktop: click + drag to pan while zoomed.
+  let mouseDragging = false;
+  let mouseStartX = 0;
+  let mouseStartY = 0;
+  let mouseStartScrollLeft = 0;
+  let mouseStartScrollTop = 0;
+
+  viewport.addEventListener('mousedown', event => {
+    if (!active || zoom <= 1 || event.button !== 0) return;
+
+    event.preventDefault();
+    mouseDragging = true;
+    mouseStartX = event.clientX;
+    mouseStartY = event.clientY;
+    mouseStartScrollLeft = viewport.scrollLeft;
+    mouseStartScrollTop = viewport.scrollTop;
+    viewport.classList.add('is-dragging');
+  });
+
+  window.addEventListener('mousemove', event => {
+    if (!mouseDragging) return;
+
+    event.preventDefault();
+    viewport.scrollLeft = mouseStartScrollLeft - (event.clientX - mouseStartX);
+    viewport.scrollTop = mouseStartScrollTop - (event.clientY - mouseStartY);
+  });
+
+  const stopMouseDrag = () => {
+    if (!mouseDragging) return;
+    mouseDragging = false;
+    viewport.classList.remove('is-dragging');
+  };
+
+  window.addEventListener('mouseup', stopMouseDrag);
+  window.addEventListener('blur', stopMouseDrag);
+
+  // Mobile: two-finger pinch zoom + one-finger drag/pan while zoomed.
+  let pinchDistance = 0;
+  let panX = 0;
+  let panY = 0;
+
+  const distanceBetweenTouches = touches => {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.hypot(dx, dy);
+  };
+
+  const midpointOfTouches = touches => ({
+    x: (touches[0].clientX + touches[1].clientX) / 2,
+    y: (touches[0].clientY + touches[1].clientY) / 2
+  });
+
+  viewport.addEventListener('touchstart', event => {
+    if (!active) return;
+
+    if (event.touches.length === 2) {
+      event.preventDefault();
+      pinchDistance = distanceBetweenTouches(event.touches);
+    } else if (event.touches.length === 1) {
+      panX = event.touches[0].clientX;
+      panY = event.touches[0].clientY;
+    }
+  }, { passive: false });
+
+  viewport.addEventListener('touchmove', event => {
+    if (!active) return;
+
+    if (event.touches.length === 2) {
+      event.preventDefault();
+      const newDistance = distanceBetweenTouches(event.touches);
+      if (!pinchDistance) {
+        pinchDistance = newDistance;
+        return;
+      }
+
+      const center = midpointOfTouches(event.touches);
+      const ratio = newDistance / pinchDistance;
+      setZoomAtPoint(zoom * ratio, center.x, center.y);
+      pinchDistance = newDistance;
+      return;
+    }
+
+    if (event.touches.length === 1 && zoom > 1) {
+      event.preventDefault();
+      const touch = event.touches[0];
+      viewport.scrollLeft += panX - touch.clientX;
+      viewport.scrollTop += panY - touch.clientY;
+      panX = touch.clientX;
+      panY = touch.clientY;
+    }
+  }, { passive: false });
+
+  viewport.addEventListener('touchend', event => {
+    if (!active) return;
+    if (event.touches.length < 2) pinchDistance = 0;
+    if (event.touches.length === 1) {
+      panX = event.touches[0].clientX;
+      panY = event.touches[0].clientY;
+    }
+  }, { passive: true });
+
+  // Double click/tap-like desktop shortcut to reset.
+  viewport.addEventListener('dblclick', event => {
+    if (!active) return;
+    event.preventDefault();
+    resetZoom();
+  });
+
+  // Non-floorplan images keep the original lightbox appearance.
+  setFloorplanMode(false);
+})();
